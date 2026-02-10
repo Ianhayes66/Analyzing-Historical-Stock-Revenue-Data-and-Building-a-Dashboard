@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# Virtual environments
+venv/
+.env
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data
+data/*.csv
+data/*.json
+!data/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# Trading
+trades.db
+portfolio.db
+backtest_results/
+
+# OS
+.DS_Store
+Thumbs.db
