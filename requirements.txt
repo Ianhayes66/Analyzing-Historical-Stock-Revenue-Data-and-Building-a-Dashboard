@@ -1,10 +1,29 @@
-yfinance>=0.2.31
+# Polymarket API
+requests>=2.31.0
+websockets>=12.0
+
+# Reddit scraping
+praw>=7.7.0
+
+# Twitter/X scraping
+tweepy>=4.14.0
+
+# NLP / Sentiment
+vaderSentiment>=3.3.2
+textblob>=0.18.0
+nltk>=3.8.0
+
+# Data & Math
 pandas>=2.0.0
 numpy>=1.24.0
-ta>=0.11.0
+scipy>=1.11.0
+
+# Dashboard
 plotly>=5.18.0
 dash>=2.14.0
 dash-bootstrap-components>=1.5.0
-schedule>=1.2.0
-requests>=2.31.0
+
+# Utilities
 python-dotenv>=1.0.0
+schedule>=1.2.0
+rich>=13.7.0

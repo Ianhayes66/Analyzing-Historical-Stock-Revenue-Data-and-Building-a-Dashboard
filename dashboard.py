@@ -1,363 +1,406 @@
 """
-Performance Dashboard
-----------------------
-Real-time web dashboard built with Plotly Dash showing:
-  - Portfolio equity curve
-  - Open positions with P&L
-  - Strategy signals heatmap
-  - Trade history table
-  - Key performance metrics cards
+Polymarket Predictor Dashboard
+--------------------------------
+Real-time web dashboard showing:
+  - Bankroll status and P&L
+  - Top opportunities with divergence signals
+  - Sentiment vs. price visualizations
+  - Open bets tracker
+  - Echo chamber alerts
+  - Narrative momentum indicators
 
-Run standalone or launched from main.py.
+Dark-themed, auto-refreshing, designed for monitoring your $50 empire.
 """
 
 import logging
+from typing import Optional
 
 import dash
 import dash_bootstrap_components as dbc
-import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 from dash.dependencies import Input, Output
 
 import config
-import data_fetcher
-import indicators
-from backtester import run_backtest
-from engine import TradingEngine
-from risk_manager import RiskManager
+from polymarket_predictor.bankroll_manager import BankrollManager
+from polymarket_predictor.signal_generator import Opportunity, SignalGenerator
 
 logger = logging.getLogger(__name__)
 
-# ── Global engine instance (shared with the running bot) ────────────────
-_engine: TradingEngine = None  # type: ignore
+_generator: SignalGenerator = None  # type: ignore
+
+COLORS = {
+    "bg": "#0a0a1a",
+    "card": "#12122a",
+    "border": "#1e1e3a",
+    "accent": "#00d4ff",
+    "green": "#00ff88",
+    "red": "#ff3366",
+    "yellow": "#ffaa00",
+    "purple": "#aa66ff",
+    "text": "#e0e0e0",
+    "muted": "#666688",
+}
 
 
-def create_app(engine: TradingEngine = None) -> dash.Dash:
-    """Build and return the Dash application."""
-    global _engine
-    _engine = engine or TradingEngine()
+def create_app(generator: SignalGenerator = None) -> dash.Dash:
+    global _generator
+    _generator = generator or SignalGenerator()
 
     app = dash.Dash(
         __name__,
-        external_stylesheets=[dbc.themes.DARKLY],
-        title="Trading Bot Dashboard",
+        external_stylesheets=[dbc.themes.CYBORG],
+        title="Polymarket Predictor",
     )
 
     app.layout = dbc.Container(
         fluid=True,
+        style={"backgroundColor": COLORS["bg"], "minHeight": "100vh", "padding": "20px"},
         children=[
-            # ── Header ──────────────────────────────────────────────────
-            dbc.Row(
-                dbc.Col(
-                    html.H1(
-                        "Trading Bot Dashboard",
-                        className="text-center my-3",
-                        style={"color": "#00d4ff"},
-                    )
-                )
-            ),
+            # Header
+            dbc.Row(dbc.Col(html.Div([
+                html.H1("POLYMARKET PREDICTOR",
+                         style={"color": COLORS["accent"], "letterSpacing": "3px",
+                                "fontWeight": "300", "marginBottom": "5px"}),
+                html.P("Sentiment-Driven Prediction Market Intelligence",
+                       style={"color": COLORS["muted"], "fontSize": "0.9rem"}),
+            ], className="text-center my-3"))),
 
-            # ── KPI Cards ───────────────────────────────────────────────
-            dbc.Row(id="kpi-cards", className="mb-3"),
+            # KPI Cards
+            dbc.Row(id="kpi-row", className="mb-4"),
 
-            # ── Charts Row ──────────────────────────────────────────────
+            # Main content
             dbc.Row([
-                dbc.Col(dcc.Graph(id="equity-chart"), md=8),
-                dbc.Col(dcc.Graph(id="allocation-chart"), md=4),
-            ], className="mb-3"),
+                # Left: Opportunities
+                dbc.Col([
+                    _card("Top Opportunities", [
+                        dash_table.DataTable(
+                            id="opps-table",
+                            style_table={"overflowX": "auto", "maxHeight": "500px",
+                                         "overflowY": "auto"},
+                            style_header={"backgroundColor": COLORS["card"],
+                                          "color": COLORS["accent"],
+                                          "fontWeight": "bold", "border": "none"},
+                            style_cell={"backgroundColor": COLORS["bg"],
+                                        "color": COLORS["text"], "textAlign": "center",
+                                        "border": f"1px solid {COLORS['border']}",
+                                        "fontSize": "0.85rem", "padding": "8px"},
+                            style_data_conditional=[
+                                {"if": {"filter_query": '{direction} = "BUY_YES"'},
+                                 "color": COLORS["green"]},
+                                {"if": {"filter_query": '{direction} = "BUY_NO"'},
+                                 "color": COLORS["red"]},
+                                {"if": {"state": "selected"},
+                                 "backgroundColor": COLORS["border"]},
+                            ],
+                        ),
+                    ]),
+                ], md=8),
 
-            # ── Signals & Positions ─────────────────────────────────────
+                # Right: Bankroll + Bets
+                dbc.Col([
+                    _card("Open Bets", [
+                        dash_table.DataTable(
+                            id="bets-table",
+                            style_table={"overflowX": "auto"},
+                            style_header={"backgroundColor": COLORS["card"],
+                                          "color": COLORS["accent"],
+                                          "fontWeight": "bold", "border": "none"},
+                            style_cell={"backgroundColor": COLORS["bg"],
+                                        "color": COLORS["text"], "textAlign": "center",
+                                        "border": f"1px solid {COLORS['border']}",
+                                        "fontSize": "0.85rem"},
+                        ),
+                    ]),
+                    html.Br(),
+                    _card("Sentiment vs Price", [
+                        dcc.Graph(id="divergence-chart",
+                                  config={"displayModeBar": False}),
+                    ]),
+                ], md=4),
+            ], className="mb-4"),
+
+            # Bottom row: Signal details + Echo chamber alerts
             dbc.Row([
                 dbc.Col([
-                    html.H4("Open Positions", style={"color": "#00d4ff"}),
-                    dash_table.DataTable(
-                        id="positions-table",
-                        style_table={"overflowX": "auto"},
-                        style_header={
-                            "backgroundColor": "#303030",
-                            "color": "#00d4ff",
-                            "fontWeight": "bold",
-                        },
-                        style_cell={
-                            "backgroundColor": "#1e1e1e",
-                            "color": "white",
-                            "textAlign": "center",
-                        },
-                    ),
+                    _card("Signal Breakdown", [
+                        dcc.Graph(id="signal-radar",
+                                  config={"displayModeBar": False}),
+                    ]),
                 ], md=6),
                 dbc.Col([
-                    html.H4("Latest Signals", style={"color": "#00d4ff"}),
-                    dash_table.DataTable(
-                        id="signals-table",
-                        style_table={"overflowX": "auto"},
-                        style_header={
-                            "backgroundColor": "#303030",
-                            "color": "#00d4ff",
-                            "fontWeight": "bold",
-                        },
-                        style_cell={
-                            "backgroundColor": "#1e1e1e",
-                            "color": "white",
-                            "textAlign": "center",
-                        },
-                        style_data_conditional=[
-                            {"if": {"filter_query": '{direction} = "BUY"'},
-                             "color": "#00ff88"},
-                            {"if": {"filter_query": '{direction} = "SELL"'},
-                             "color": "#ff4444"},
-                        ],
-                    ),
+                    _card("Echo Chamber Alerts", [
+                        html.Div(id="echo-alerts"),
+                    ]),
                 ], md=6),
-            ], className="mb-3"),
+            ]),
 
-            # ── Trade History ───────────────────────────────────────────
-            dbc.Row(
-                dbc.Col([
-                    html.H4("Recent Trade History", style={"color": "#00d4ff"}),
+            # Trade history
+            dbc.Row(dbc.Col(
+                _card("Trade History", [
                     dash_table.DataTable(
-                        id="trades-table",
+                        id="history-table",
                         style_table={"overflowX": "auto"},
-                        style_header={
-                            "backgroundColor": "#303030",
-                            "color": "#00d4ff",
-                            "fontWeight": "bold",
-                        },
-                        style_cell={
-                            "backgroundColor": "#1e1e1e",
-                            "color": "white",
-                            "textAlign": "center",
-                        },
+                        style_header={"backgroundColor": COLORS["card"],
+                                      "color": COLORS["accent"],
+                                      "fontWeight": "bold", "border": "none"},
+                        style_cell={"backgroundColor": COLORS["bg"],
+                                    "color": COLORS["text"], "textAlign": "center",
+                                    "border": f"1px solid {COLORS['border']}",
+                                    "fontSize": "0.85rem"},
                         style_data_conditional=[
-                            {"if": {"filter_query": "{pnl} > 0"},
-                             "color": "#00ff88"},
-                            {"if": {"filter_query": "{pnl} < 0"},
-                             "color": "#ff4444"},
+                            {"if": {"filter_query": "{pnl} > 0"}, "color": COLORS["green"]},
+                            {"if": {"filter_query": "{pnl} < 0"}, "color": COLORS["red"]},
                         ],
                     ),
-                ])
-            ),
+                ]),
+            ), className="mb-4"),
 
-            # ── Auto-refresh ────────────────────────────────────────────
-            dcc.Interval(id="refresh-interval", interval=30_000, n_intervals=0),
+            dcc.Interval(id="refresh", interval=config.REFRESH_INTERVAL_SEC * 1000,
+                         n_intervals=0),
         ],
     )
 
-    # ── Callbacks ───────────────────────────────────────────────────────
+    # ── Callbacks ───────────────────────────────────────────────────
     @app.callback(
         [
-            Output("kpi-cards", "children"),
-            Output("equity-chart", "figure"),
-            Output("allocation-chart", "figure"),
-            Output("positions-table", "data"),
-            Output("positions-table", "columns"),
-            Output("signals-table", "data"),
-            Output("signals-table", "columns"),
-            Output("trades-table", "data"),
-            Output("trades-table", "columns"),
+            Output("kpi-row", "children"),
+            Output("opps-table", "data"),
+            Output("opps-table", "columns"),
+            Output("bets-table", "data"),
+            Output("bets-table", "columns"),
+            Output("divergence-chart", "figure"),
+            Output("signal-radar", "figure"),
+            Output("echo-alerts", "children"),
+            Output("history-table", "data"),
+            Output("history-table", "columns"),
         ],
-        [Input("refresh-interval", "n_intervals")],
+        [Input("refresh", "n_intervals")],
     )
-    def update_dashboard(_n):
-        status = _engine.get_status()
-        portfolio = status.get("portfolio", {})
+    def update(_n):
+        opps = _generator.get_top_opportunities(20)
+        bankroll = _generator.bankroll.get_summary()
 
-        # ── KPI Cards ──────────────────────────────────────────────
-        cards = _build_kpi_cards(portfolio)
+        kpis = _build_kpis(bankroll, len(opps))
+        opp_data, opp_cols = _build_opps_table(opps)
+        bet_data, bet_cols = _build_bets_table(_generator.bankroll)
+        div_fig = _build_divergence_chart(opps)
+        radar_fig = _build_radar(opps)
+        echo_alerts = _build_echo_alerts(opps)
+        hist_data, hist_cols = _build_history(_generator.bankroll)
 
-        # ── Equity Chart ───────────────────────────────────────────
-        equity_fig = _build_equity_chart(status)
-
-        # ── Allocation Chart ───────────────────────────────────────
-        alloc_fig = _build_allocation_chart(status)
-
-        # ── Positions Table ────────────────────────────────────────
-        pos_data, pos_cols = _build_positions_table(status)
-
-        # ── Signals Table ──────────────────────────────────────────
-        sig_data, sig_cols = _build_signals_table(status)
-
-        # ── Trades Table ───────────────────────────────────────────
-        trade_data, trade_cols = _build_trades_table(status)
-
-        return (
-            cards, equity_fig, alloc_fig,
-            pos_data, pos_cols,
-            sig_data, sig_cols,
-            trade_data, trade_cols,
-        )
+        return (kpis, opp_data, opp_cols, bet_data, bet_cols,
+                div_fig, radar_fig, echo_alerts, hist_data, hist_cols)
 
     return app
 
 
-# ── Component Builders ──────────────────────────────────────────────────
+# ── Component Helpers ───────────────────────────────────────────────
 
-def _build_kpi_cards(portfolio: dict) -> list:
-    pv = portfolio.get("portfolio_value", 0)
-    ret = portfolio.get("return_pct", 0)
-    wr = portfolio.get("win_rate", 0)
-    trades = portfolio.get("total_trades", 0)
-    pf = portfolio.get("profit_factor", 0)
-    dd = portfolio.get("daily_pnl", 0)
+def _card(title: str, children: list) -> dbc.Card:
+    return dbc.Card(
+        [
+            dbc.CardHeader(title, style={
+                "backgroundColor": COLORS["card"],
+                "color": COLORS["accent"],
+                "borderBottom": f"1px solid {COLORS['border']}",
+                "fontWeight": "600",
+            }),
+            dbc.CardBody(children, style={"backgroundColor": COLORS["bg"]}),
+        ],
+        style={"border": f"1px solid {COLORS['border']}",
+               "borderRadius": "8px"},
+    )
 
-    kpis = [
-        ("Portfolio Value", f"${pv:,.2f}", "#00d4ff"),
-        ("Total Return", f"{ret:.2%}", "#00ff88" if ret >= 0 else "#ff4444"),
-        ("Win Rate", f"{wr:.0%}", "#00ff88" if wr >= 0.5 else "#ffaa00"),
-        ("Total Trades", str(trades), "#00d4ff"),
-        ("Profit Factor", f"{pf:.2f}", "#00ff88" if pf >= 1 else "#ff4444"),
-        ("Daily P&L", f"${dd:,.2f}", "#00ff88" if dd >= 0 else "#ff4444"),
-    ]
 
+def _kpi_card(label: str, value: str, color: str) -> dbc.Col:
+    return dbc.Col(
+        dbc.Card(
+            dbc.CardBody([
+                html.P(label, className="mb-1",
+                       style={"color": COLORS["muted"], "fontSize": "0.75rem",
+                              "textTransform": "uppercase", "letterSpacing": "1px"}),
+                html.H3(value, style={"color": color, "fontWeight": "300"}),
+            ]),
+            style={"backgroundColor": COLORS["card"],
+                   "border": f"1px solid {COLORS['border']}",
+                   "borderRadius": "8px"},
+        ),
+        md=2, className="mb-2",
+    )
+
+
+def _build_kpis(bankroll: dict, n_opps: int) -> list:
+    pnl = bankroll["total_pnl"]
+    roi = bankroll["roi_pct"]
     return [
-        dbc.Col(
-            dbc.Card(
-                dbc.CardBody([
-                    html.P(label, className="text-muted mb-1",
-                           style={"fontSize": "0.85rem"}),
-                    html.H4(value, style={"color": color}),
-                ]),
-                style={"backgroundColor": "#1e1e1e", "border": "1px solid #333"},
-            ),
-            md=2,
-        )
-        for label, value, color in kpis
+        _kpi_card("Bankroll", f"${bankroll['bankroll']:.2f}",
+                  COLORS["accent"]),
+        _kpi_card("P&L", f"${pnl:+.2f}",
+                  COLORS["green"] if pnl >= 0 else COLORS["red"]),
+        _kpi_card("ROI", f"{roi:+.1f}%",
+                  COLORS["green"] if roi >= 0 else COLORS["red"]),
+        _kpi_card("Win Rate", f"{bankroll['win_rate']:.0f}%",
+                  COLORS["green"] if bankroll["win_rate"] >= 50 else COLORS["yellow"]),
+        _kpi_card("Open Bets", str(bankroll["open_bets"]),
+                  COLORS["purple"]),
+        _kpi_card("Opportunities", str(n_opps),
+                  COLORS["accent"]),
     ]
 
 
-def _build_equity_chart(status: dict) -> go.Figure:
+def _build_opps_table(opps):
+    data = []
+    for o in opps[:20]:
+        data.append({
+            "score": f"{o.composite_score:.2f}",
+            "direction": o.signal.direction,
+            "edge": f"{o.signal.edge_estimate:+.1%}",
+            "confidence": f"{o.signal.confidence:.0%}",
+            "bet": f"${o.recommended_bet:.2f}" if o.recommended_bet > 0 else "-",
+            "type": o.signal.signal_type,
+            "price": f"{o.signal.market_price:.0%}",
+            "question": o.market["question"][:50],
+        })
+    cols = [{"name": c.title(), "id": c} for c in
+            ["score", "direction", "edge", "confidence", "bet", "type", "price", "question"]]
+    return data, cols
+
+
+def _build_bets_table(bankroll_mgr: BankrollManager):
+    data = []
+    for b in bankroll_mgr.state.open_bets:
+        data.append({
+            "direction": b.direction,
+            "amount": f"${b.amount:.2f}",
+            "entry": f"{b.entry_price:.2f}",
+            "edge": f"{b.estimated_edge:+.1%}",
+            "type": b.signal_type,
+            "question": b.question[:40],
+        })
+    cols = [{"name": c.title(), "id": c} for c in
+            ["direction", "amount", "entry", "edge", "type", "question"]]
+    return data, cols
+
+
+def _build_divergence_chart(opps) -> go.Figure:
     fig = go.Figure()
-    # Use trade history to build a simple equity line
-    trades = status.get("trade_history", [])
-    if trades:
-        cumulative_pnl = []
-        running = config.INITIAL_CAPITAL
-        for t in trades:
-            running += t.get("pnl", 0)
-            cumulative_pnl.append(running)
-        fig.add_trace(go.Scatter(
-            y=cumulative_pnl,
-            mode="lines",
-            name="Equity",
-            line=dict(color="#00d4ff", width=2),
-            fill="tozeroy",
-            fillcolor="rgba(0, 212, 255, 0.1)",
+    if opps:
+        top = opps[:10]
+        questions = [o.market["question"][:25] for o in top]
+        market_prices = [o.signal.market_price for o in top]
+        sentiment_prices = [o.signal.sentiment_price for o in top]
+
+        fig.add_trace(go.Bar(
+            name="Market Price", x=questions, y=market_prices,
+            marker_color=COLORS["accent"], opacity=0.7,
         ))
-    else:
-        fig.add_trace(go.Scatter(
-            y=[config.INITIAL_CAPITAL],
-            mode="lines",
-            name="Equity",
-            line=dict(color="#00d4ff"),
+        fig.add_trace(go.Bar(
+            name="Sentiment Est.", x=questions, y=sentiment_prices,
+            marker_color=COLORS["purple"], opacity=0.7,
         ))
 
     fig.update_layout(
-        title="Equity Curve",
+        barmode="group",
         template="plotly_dark",
-        paper_bgcolor="#1e1e1e",
-        plot_bgcolor="#1e1e1e",
-        margin=dict(l=40, r=20, t=40, b=30),
+        paper_bgcolor=COLORS["bg"],
+        plot_bgcolor=COLORS["bg"],
+        margin=dict(l=30, r=10, t=10, b=60),
+        height=280,
+        legend=dict(orientation="h", y=1.1),
+        font=dict(size=10),
     )
     return fig
 
 
-def _build_allocation_chart(status: dict) -> go.Figure:
-    positions = status.get("positions", {})
-    if positions:
-        labels = list(positions.keys())
-        values = [abs(p.get("pnl", 0) + p["entry_price"] * p["shares"])
-                  for p in positions.values()]
-    else:
-        labels = ["Cash"]
-        values = [status.get("portfolio", {}).get("cash", config.INITIAL_CAPITAL)]
+def _build_radar(opps) -> go.Figure:
+    fig = go.Figure()
+    if opps:
+        o = opps[0]
+        categories = ["Divergence", "Velocity", "Echo Inv.", "Bayesian", "Volume"]
+        values = [
+            min(abs(o.signal.edge_estimate) * 5, 1),
+            min(abs(o.narrative.momentum_score), 1),
+            1 - o.echo.uniformity_score,
+            o.signal.confidence,
+            min(o.sentiment.sample_size / 50, 1),
+        ]
+        values.append(values[0])  # Close the polygon
+        categories.append(categories[0])
 
-    # Always add cash
-    cash = status.get("portfolio", {}).get("cash", 0)
-    if positions:
-        labels.append("Cash")
-        values.append(cash)
+        fig.add_trace(go.Scatterpolar(
+            r=values, theta=categories, fill="toself",
+            fillcolor=f"rgba(0, 212, 255, 0.15)",
+            line=dict(color=COLORS["accent"]),
+            name=o.market["question"][:30],
+        ))
 
-    fig = go.Figure(go.Pie(
-        labels=labels,
-        values=values,
-        hole=0.5,
-        marker=dict(colors=["#00d4ff", "#00ff88", "#ffaa00", "#ff4444",
-                            "#aa44ff", "#44ffaa", "#ff8800", "#888888"]),
-    ))
     fig.update_layout(
-        title="Allocation",
+        polar=dict(
+            bgcolor=COLORS["bg"],
+            radialaxis=dict(visible=True, range=[0, 1],
+                            gridcolor=COLORS["border"]),
+            angularaxis=dict(gridcolor=COLORS["border"]),
+        ),
         template="plotly_dark",
-        paper_bgcolor="#1e1e1e",
-        plot_bgcolor="#1e1e1e",
-        margin=dict(l=20, r=20, t=40, b=20),
-        showlegend=True,
-        legend=dict(font=dict(size=10)),
+        paper_bgcolor=COLORS["bg"],
+        margin=dict(l=40, r=40, t=20, b=20),
+        height=300,
+        showlegend=False,
+        font=dict(size=10),
     )
     return fig
 
 
-def _build_positions_table(status: dict):
-    positions = status.get("positions", {})
+def _build_echo_alerts(opps) -> list:
+    alerts = []
+    for o in opps[:10]:
+        if o.echo.is_echo_chamber:
+            alerts.append(
+                dbc.Alert(
+                    [
+                        html.Strong(f"ECHO CHAMBER: "),
+                        html.Span(
+                            f"{o.market['question'][:60]} — "
+                            f"{o.echo.dominant_pct:.0%} agree on {o.echo.dominant_direction}. "
+                            f"{'CONTRARIAN signal!' if o.echo.contrarian_signal else 'Signal dampened.'}"
+                        ),
+                    ],
+                    color="warning" if not o.echo.contrarian_signal else "info",
+                    className="mb-2",
+                    style={"fontSize": "0.85rem"},
+                )
+            )
+
+    if not alerts:
+        alerts.append(html.P(
+            "No echo chamber alerts. Sentiment diversity is healthy.",
+            style={"color": COLORS["muted"], "fontStyle": "italic"},
+        ))
+
+    return alerts
+
+
+def _build_history(bankroll_mgr: BankrollManager):
     data = []
-    for ticker, p in positions.items():
+    for b in reversed(bankroll_mgr.state.closed_bets[-20:]):
         data.append({
-            "ticker": ticker,
-            "direction": p["direction"],
-            "shares": p["shares"],
-            "entry": f"${p['entry_price']:.2f}",
-            "current": f"${p['current_price']:.2f}",
-            "pnl": f"${p['pnl']:.2f}",
-            "pnl_pct": f"{p['pnl_pct']:.1%}",
-            "stop": f"${p['stop_loss']:.2f}",
+            "direction": b.direction,
+            "amount": f"${b.amount:.2f}",
+            "entry": f"{b.entry_price:.2f}",
+            "exit": f"{b.exit_price:.2f}",
+            "pnl": round(b.pnl, 2),
+            "status": b.status,
+            "question": b.question[:40],
         })
-    columns = [{"name": c, "id": c} for c in
-               ["ticker", "direction", "shares", "entry", "current",
-                "pnl", "pnl_pct", "stop"]]
-    return data, columns
+    cols = [{"name": c.title(), "id": c} for c in
+            ["direction", "amount", "entry", "exit", "pnl", "status", "question"]]
+    return data, cols
 
 
-def _build_signals_table(status: dict):
-    signals = status.get("latest_signals", {})
-    data = []
-    for ticker, sigs in signals.items():
-        for s in sigs:
-            data.append({
-                "ticker": ticker,
-                "strategy": s["strategy"],
-                "direction": s["direction"],
-                "confidence": f"{s['confidence']:.0%}",
-                "reason": s["reason"][:80],
-            })
-    columns = [{"name": c, "id": c} for c in
-               ["ticker", "strategy", "direction", "confidence", "reason"]]
-    return data, columns
-
-
-def _build_trades_table(status: dict):
-    trades = status.get("trade_history", [])
-    data = []
-    for t in reversed(trades[-20:]):
-        data.append({
-            "ticker": t["ticker"],
-            "direction": t["direction"],
-            "entry": f"${t['entry_price']:.2f}",
-            "exit": f"${t['exit_price']:.2f}",
-            "pnl": round(t["pnl"], 2),
-            "pnl_pct": f"{t['pnl_pct']:.1%}",
-            "reason": t.get("reason", ""),
-        })
-    columns = [{"name": c, "id": c} for c in
-               ["ticker", "direction", "entry", "exit", "pnl", "pnl_pct", "reason"]]
-    return data, columns
-
-
-def run_dashboard(engine: TradingEngine = None, debug: bool = config.DASHBOARD_DEBUG):
-    """Launch the dashboard server."""
-    app = create_app(engine)
-    logger.info(
-        f"Dashboard running at http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}"
-    )
+def run_dashboard(generator: SignalGenerator = None, debug: bool = False):
+    app = create_app(generator)
+    logger.info(f"Dashboard: http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}")
     app.run(
         host=config.DASHBOARD_HOST,
         port=config.DASHBOARD_PORT,
