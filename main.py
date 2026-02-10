@@ -97,8 +97,22 @@ def cmd_monitor(args):
         logger.info(f"Dashboard at http://localhost:{config.DASHBOARD_PORT}")
 
     def _scan_cycle():
+        # First: check if any open bets have resolved
+        resolved = gen.check_resolutions()
+        for r in resolved:
+            symbol = "+" if r["pnl"] >= 0 else ""
+            print(f"  RESOLVED: {r['status'].upper()} {symbol}${r['pnl']:.2f} — {r['bet'][:50]}")
+
+        # Second: check exit signals (stop-loss / take-profit)
+        exits = gen.check_exit_signals()
+        for e in exits:
+            symbol = "+" if e["pnl"] >= 0 else ""
+            print(f"  EXIT ({e['reason']}): {symbol}${e['pnl']:.2f} — {e['bet'][:50]}")
+
+        # Third: scan for new opportunities
         opportunities = gen.scan()
         gen.print_opportunities(opportunities)
+
         # Alert on strong signals
         for opp in opportunities[:3]:
             if opp.composite_score > 0.7:

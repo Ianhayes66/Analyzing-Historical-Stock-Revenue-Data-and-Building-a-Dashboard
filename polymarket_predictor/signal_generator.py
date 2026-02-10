@@ -18,6 +18,7 @@ actionable opportunities with bet sizes.
 """
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -33,7 +34,9 @@ from polymarket_predictor.echo_chamber import (
     NarrativeTracker,
 )
 from polymarket_predictor.polymarket_client import (
+    check_market_resolution,
     fetch_active_markets,
+    fetch_market_by_id,
     filter_markets,
 )
 from polymarket_predictor.reddit_scraper import RedditScraper
@@ -71,6 +74,7 @@ class SignalGenerator:
         self.divergence = DivergenceEngine()
         self.bankroll = bankroll_mgr or BankrollManager()
 
+        self._lock = threading.Lock()  # Thread safety for dashboard + monitor
         self._last_scan: Optional[datetime] = None
         self._opportunities: List[Opportunity] = []
 
@@ -108,15 +112,109 @@ class SignalGenerator:
         # Sort by composite score
         opportunities.sort(key=lambda o: o.composite_score, reverse=True)
 
-        self._opportunities = opportunities
-        self._last_scan = datetime.now(timezone.utc)
+        with self._lock:
+            self._opportunities = opportunities
+            self._last_scan = datetime.now(timezone.utc)
 
         logger.info(f"Scan complete: {len(opportunities)} opportunities found")
         return opportunities
 
+    def check_resolutions(self) -> List[dict]:
+        """
+        Check all open bets for market resolution.
+        Auto-closes resolved bets and updates bankroll.
+        Returns list of closed bet summaries.
+        """
+        closed = []
+        open_bets = list(self.bankroll.state.open_bets)
+
+        if not open_bets:
+            return closed
+
+        logger.info(f"Checking resolution for {len(open_bets)} open bets...")
+
+        for bet in open_bets:
+            resolution = check_market_resolution(bet.market_id)
+            if resolution is None:
+                continue  # Still open
+
+            winning = resolution.get("winning_outcome")
+            if winning is None:
+                # Market closed but outcome unclear — check price
+                final_price = resolution.get("final_yes_price", 0.5)
+                if final_price > 0.95:
+                    winning = "YES"
+                elif final_price < 0.05:
+                    winning = "NO"
+                else:
+                    # Refetch to get current price for a sell
+                    market = fetch_market_by_id(bet.market_id)
+                    if market:
+                        exit_price = market["yes_price"] if bet.direction == "YES" else market["no_price"]
+                        result = self.bankroll.close_bet(bet.market_id, exit_price, status="sold")
+                        if result:
+                            closed.append({"bet": bet.question, "status": "sold", "pnl": result.pnl})
+                    continue
+
+            # Determine if bet won
+            if winning == bet.direction:
+                status = "won"
+                exit_price = 1.0
+            else:
+                status = "lost"
+                exit_price = 0.0
+
+            result = self.bankroll.close_bet(bet.market_id, exit_price, status=status)
+            if result:
+                symbol = "+" if result.pnl >= 0 else ""
+                logger.info(
+                    f"  RESOLVED: '{bet.question[:50]}' → {status.upper()} "
+                    f"({symbol}${result.pnl:.2f})"
+                )
+                closed.append({
+                    "bet": bet.question,
+                    "status": status,
+                    "pnl": result.pnl,
+                })
+
+        return closed
+
+    def check_exit_signals(self) -> List[dict]:
+        """
+        Check open bets for exit conditions:
+          - Market price moved strongly against us (cut losses)
+          - Market price moved strongly in our favor (take profit)
+        """
+        exits = []
+        for bet in list(self.bankroll.state.open_bets):
+            market = fetch_market_by_id(bet.market_id)
+            if not market:
+                continue
+
+            current_price = market["yes_price"] if bet.direction == "YES" else market["no_price"]
+
+            # Stop-loss: if price dropped >40% from entry, cut it
+            loss_pct = (current_price - bet.entry_price) / max(bet.entry_price, 0.01)
+            if loss_pct < -0.40:
+                result = self.bankroll.close_bet(bet.market_id, current_price, status="sold")
+                if result:
+                    logger.info(f"  STOP-LOSS: '{bet.question[:50]}' at {loss_pct:.0%}")
+                    exits.append({"bet": bet.question, "reason": "stop-loss", "pnl": result.pnl})
+                continue
+
+            # Take-profit: if price >85% (near certainty), lock in gains
+            if current_price > 0.85 and bet.entry_price < 0.75:
+                result = self.bankroll.close_bet(bet.market_id, current_price, status="sold")
+                if result:
+                    logger.info(f"  TAKE-PROFIT: '{bet.question[:50]}' at {current_price:.2f}")
+                    exits.append({"bet": bet.question, "reason": "take-profit", "pnl": result.pnl})
+
+        return exits
+
     def get_top_opportunities(self, n: int = 10) -> List[Opportunity]:
-        """Get the top N opportunities from the last scan."""
-        return self._opportunities[:n]
+        """Get the top N opportunities from the last scan (thread-safe)."""
+        with self._lock:
+            return list(self._opportunities[:n])
 
     def _analyze_market(self, market: dict) -> Optional[Opportunity]:
         """Full analysis pipeline for a single market."""

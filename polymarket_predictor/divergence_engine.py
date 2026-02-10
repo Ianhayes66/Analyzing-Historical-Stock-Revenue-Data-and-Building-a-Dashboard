@@ -252,18 +252,19 @@ class DivergenceEngine:
 
         if crowd_direction == "YES":
             # Crowd thinks YES, so contrarian = BUY_NO
-            # But only if market price is significantly below crowd sentiment
+            # Market is below crowd sentiment — trust market, fade crowd
             if market_price < sentiment.yes_probability - 0.10:
-                edge = sentiment.yes_probability - market_price
-                # FADE: if echo chamber, the market might be right
-                edge = -edge * 0.5  # Contrarian: opposite of crowd
+                raw_gap = sentiment.yes_probability - market_price
+                edge = -(raw_gap * 0.5)  # Negative edge = BUY_NO
                 direction = "BUY_NO"
             else:
                 return None
         else:
+            # Crowd thinks NO, so contrarian = BUY_YES
+            # Market is above crowd sentiment — trust market, fade crowd
             if market_price > sentiment.yes_probability + 0.10:
-                edge = market_price - sentiment.yes_probability
-                edge = edge * 0.5
+                raw_gap = market_price - sentiment.yes_probability
+                edge = raw_gap * 0.5  # Positive edge = BUY_YES
                 direction = "BUY_YES"
             else:
                 return None

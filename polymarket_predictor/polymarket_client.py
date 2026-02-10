@@ -124,7 +124,7 @@ def search_markets(query: str, limit: int = 20) -> List[dict]:
                 "limit": limit,
                 "active": True,
                 "closed": False,
-                "tag": query,
+                "slug": query,
             },
             timeout=10,
         )
@@ -158,6 +158,57 @@ def fetch_market_history(condition_id: str, fidelity: int = 60) -> List[dict]:
     except Exception as e:
         logger.error(f"Error fetching history for {condition_id}: {e}")
         return []
+
+
+def check_market_resolution(market_id: str) -> Optional[dict]:
+    """
+    Check if a market has resolved.
+    Returns None if still open, or a dict with resolution info.
+    """
+    try:
+        resp = requests.get(
+            f"{config.POLYMARKET_GAMMA_API}/markets/{market_id}",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+
+        resolved = raw.get("resolved", False)
+        closed = raw.get("closed", False)
+
+        if not resolved and not closed:
+            return None
+
+        # Determine winning outcome
+        outcome_prices = raw.get("outcomePrices", [])
+        winning_outcome = None
+        if outcome_prices:
+            prices = [float(p) for p in outcome_prices]
+            # After resolution, winning outcome price goes to ~1.0
+            if prices[0] > 0.95:
+                winning_outcome = "YES"
+            elif len(prices) > 1 and prices[1] > 0.95:
+                winning_outcome = "NO"
+
+        # Also check explicit resolution field
+        if winning_outcome is None:
+            resolution = raw.get("resolution", "")
+            if resolution:
+                winning_outcome = resolution.upper()
+
+        yes_price = float(outcome_prices[0]) if outcome_prices else 0.5
+
+        return {
+            "market_id": market_id,
+            "resolved": resolved,
+            "closed": closed,
+            "winning_outcome": winning_outcome,
+            "final_yes_price": yes_price,
+            "question": raw.get("question", ""),
+        }
+    except Exception as e:
+        logger.error(f"Error checking resolution for {market_id}: {e}")
+        return None
 
 
 def get_market_categories() -> List[str]:
